@@ -48,6 +48,8 @@ from situational_graphs_reasoning_msgs.msg import Match as MatchMsg
 from situational_graphs_reasoning_msgs.msg import Node as NodeMsg
 from situational_graphs_reasoning_msgs.msg import Edge as EdgeMsg
 from situational_graphs_reasoning_msgs.msg import Attribute as AttributeMsg
+from situational_graphs_reasoning_msgs.msg import AmbiguousRoom as AmbiguousRoomMsg
+from situational_graphs_reasoning_msgs.msg import AmbiguousRoomMatch as AmbiguousRoomMatchMsg
 from situational_graphs_wrapper.GraphWrapper import GraphWrapper
 
 
@@ -78,6 +80,7 @@ class GraphMatchingNode(Node):
         self.unique_match_visualization_inc_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/unique_match_visualization/incremental', 10)
         self.unique_match_visualization_full_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/unique_match_visualization/full', 10)
         self.unique_match_visualization_dev_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/unique_match_visualization/dev', 10)
+        self.ambiguous_match_publisher = self.create_publisher(AmbiguousRoomMatchMsg, 'graph_matching/ambigous_match', 10)
         # self.symmetry_match_1_visualization_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/symmetry_match_1_visualization', 10)
         # self.symmetry_match_1_visualization_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/symmetry_match_2_visualization', 10)
         # self.symmetry_match_1_visualization_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/symmetry_match_3_visualization', 10)
@@ -176,8 +179,25 @@ class GraphMatchingNode(Node):
                     symmetry_match_visualization_publisher = self.create_publisher(MarkerArrayMsg, f'graph_matching/symmetry_match_{i+1}_visualization', 10)
                     symmetry_match_visualization_publisher.publish(symmetry_match_visualization_msg)
 
+                ambiguous_match_msg = self.generate_ambiguous_match_msg(matches)
+                if ambiguous_match_msg.ambiguous_rooms:
+                    self.get_logger().info(
+                        "AMBIGUOUS ROOM MATCH: {} symmetries, score {:.4f}. Rooms: {}".format(
+                            ambiguous_match_msg.n_symmetries,
+                            ambiguous_match_msg.score,
+                            [(r.prior_room_id, list(r.target_room_ids)) for r in ambiguous_match_msg.ambiguous_rooms]
+                        )
+                    )
+                    self.ambiguous_match_publisher.publish(ambiguous_match_msg)
+
+            if not success or len(matches) == 0:
+                self.get_logger().info("MATCH FAILED: no consistent match found for this graph")
+
             if success and len(matches) == 1:
                 unique_match_msg = self.generate_match_msg(matches[0])
+                self.get_logger().info(
+                    "UNIQUE MATCH: publishing {} pairs on graph_matching/unique_match".format(len(matches[0]))
+                )
                 self.unique_match_publisher.publish(unique_match_msg)
                 unique_match_visualization_inc_msg = self.generate_match_visualization_msg(matches[0])
                 self.unique_match_visualization_inc_publisher.publish(unique_match_visualization_inc_msg)
@@ -264,6 +284,28 @@ class GraphMatchingNode(Node):
             match_msg.target_nodes.append(target_node_msg)
 
         return match_msg
+
+
+    def generate_ambiguous_match_msg(self, matches):
+        room_targets = {}
+        for match in matches:
+            for pair in match:
+                if pair["origin_node_attrs"]["type"] == "Finite Room":
+                    room_targets.setdefault(pair["origin_node"], set()).add(pair["target_node"])
+
+        ambiguous_match_msg = AmbiguousRoomMatchMsg()
+        ambiguous_match_msg.header.stamp = self.get_clock().now().to_msg()
+        ambiguous_match_msg.header.frame_id = "map"
+        ambiguous_match_msg.n_symmetries = len(matches)
+        ambiguous_match_msg.score = matches[0][0]["score"]
+        for prior_room_id, target_room_ids in room_targets.items():
+            if len(target_room_ids) > 1:
+                ambiguous_room_msg = AmbiguousRoomMsg()
+                ambiguous_room_msg.prior_room_id = prior_room_id
+                ambiguous_room_msg.target_room_ids = sorted(target_room_ids)
+                ambiguous_match_msg.ambiguous_rooms.append(ambiguous_room_msg)
+
+        return ambiguous_match_msg
 
 
     def dict_to_attr_msg_list(self, attr_dict):
