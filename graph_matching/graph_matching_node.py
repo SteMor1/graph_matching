@@ -81,6 +81,7 @@ class GraphMatchingNode(Node):
         self.unique_match_visualization_full_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/unique_match_visualization/full', 10)
         self.unique_match_visualization_dev_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/unique_match_visualization/dev', 10)
         self.ambiguous_match_publisher = self.create_publisher(AmbiguousRoomMatchMsg, 'graph_matching/ambigous_match', 10)
+        self._published_ambiguous_sigs = set()  # signatures of ambiguous cases already published, to avoid resending the same one
         # self.symmetry_match_1_visualization_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/symmetry_match_1_visualization', 10)
         # self.symmetry_match_1_visualization_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/symmetry_match_2_visualization', 10)
         # self.symmetry_match_1_visualization_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/symmetry_match_3_visualization', 10)
@@ -181,14 +182,21 @@ class GraphMatchingNode(Node):
 
                 ambiguous_match_msg = self.generate_ambiguous_match_msg(matches)
                 if ambiguous_match_msg.ambiguous_rooms:
-                    self.get_logger().info(
-                        "AMBIGUOUS ROOM MATCH: {} symmetries, score {:.4f}. Rooms: {}".format(
-                            ambiguous_match_msg.n_symmetries,
-                            ambiguous_match_msg.score,
-                            [(r.prior_room_id, list(r.target_room_ids)) for r in ambiguous_match_msg.ambiguous_rooms]
-                        )
+                    # signature of this ambiguous case: each online room with its set of prior candidates
+                    ambiguous_sig = frozenset(
+                        (r.online_room_id, frozenset(r.prior_candidate_ids))
+                        for r in ambiguous_match_msg.ambiguous_rooms
                     )
-                    self.ambiguous_match_publisher.publish(ambiguous_match_msg)
+                    if ambiguous_sig in self._published_ambiguous_sigs:
+                        self.get_logger().info("AMBIGUOUS ROOM MATCH: already published this case, skipping")
+                    else:
+                        self._published_ambiguous_sigs.add(ambiguous_sig)
+                        self.get_logger().info(
+                            "AMBIGUOUS ROOM MATCH: {}".format(
+                                [(r.online_room_id, list(r.prior_candidate_ids)) for r in ambiguous_match_msg.ambiguous_rooms]
+                            )
+                        )
+                        self.ambiguous_match_publisher.publish(ambiguous_match_msg)
 
             if not success or len(matches) == 0:
                 self.get_logger().info("MATCH FAILED: no consistent match found for this graph")
@@ -287,22 +295,23 @@ class GraphMatchingNode(Node):
 
 
     def generate_ambiguous_match_msg(self, matches):
-        room_targets = {}
+        # online room (observed) -> set of prior rooms it could be, across all symmetries.
+        # Grouping by the online room collects EVERY prior candidate for that room, so a
+        # prior that maps to a single online room is no longer dropped (origin=prior, target=online).
+        online_priors = {}
         for match in matches:
             for pair in match:
                 if pair["origin_node_attrs"]["type"] == "Finite Room":
-                    room_targets.setdefault(pair["origin_node"], set()).add(pair["target_node"])
+                    online_priors.setdefault(pair["target_node"], set()).add(pair["origin_node"])
 
         ambiguous_match_msg = AmbiguousRoomMatchMsg()
         ambiguous_match_msg.header.stamp = self.get_clock().now().to_msg()
         ambiguous_match_msg.header.frame_id = "map"
-        ambiguous_match_msg.n_symmetries = len(matches)
-        ambiguous_match_msg.score = matches[0][0]["score"]
-        for prior_room_id, target_room_ids in room_targets.items():
-            if len(target_room_ids) > 1:
+        for online_room_id, prior_candidate_ids in online_priors.items():
+            if len(prior_candidate_ids) > 1:
                 ambiguous_room_msg = AmbiguousRoomMsg()
-                ambiguous_room_msg.prior_room_id = prior_room_id
-                ambiguous_room_msg.target_room_ids = sorted(target_room_ids)
+                ambiguous_room_msg.online_room_id = online_room_id
+                ambiguous_room_msg.prior_candidate_ids = sorted(prior_candidate_ids)
                 ambiguous_match_msg.ambiguous_rooms.append(ambiguous_room_msg)
 
         return ambiguous_match_msg
