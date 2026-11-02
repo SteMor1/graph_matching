@@ -120,8 +120,8 @@ class GraphMatcher():
                 #         all_pairs_and_parent_numerical = copy.deepcopy(all_pairs_numerical)
                 #     data1, data2, all_pairs_and_parent_numerical = self.add_parents_data(data1, data2, all_pairs_and_parent_numerical, best_pair_attrs[0]["Geometric_info"],best_pair_attrs[1]["Geometric_info"])
                 #     origin_nodes_attrs = [best_pair_attrs[0]["Geometric_info"],best_pair_attrs[1]["Geometric_info"]]
-                data1 = copy.deepcopy(self.geometric_info_transformation(data1, swept_levels[lvl], origin_nodes_attrs[0]))
-                data2 = copy.deepcopy(self.geometric_info_transformation(data2, swept_levels[lvl], origin_nodes_attrs[1]))
+                data1 = self.geometric_info_transformation(data1, swept_levels[lvl], origin_nodes_attrs[0])
+                data2 = self.geometric_info_transformation(data2, swept_levels[lvl], origin_nodes_attrs[1])
                 clipper.score_pairwise_consistency(data1, data2, all_pairs_and_parent_numerical)
                 M_aux, _ = clipper.get_M_C_matrices()
                 
@@ -167,8 +167,8 @@ class GraphMatcher():
                     # parent_pair = all_pairs_and_parent_numerical[-1]
                     # A_numerical = all_pairs_and_parent_numerical
                     ### END
-                    data1 = copy.deepcopy(self.geometric_info_transformation(data1, swept_levels[lvl], working_node_attrs["data_node1"]))
-                    data2 = copy.deepcopy(self.geometric_info_transformation(data2, swept_levels[lvl], working_node_attrs["data_node2"]))
+                    data1 = self.geometric_info_transformation(data1, swept_levels[lvl], working_node_attrs["data_node1"])
+                    data2 = self.geometric_info_transformation(data2, swept_levels[lvl], working_node_attrs["data_node2"])
                 
                 ### DEBUGGING
                 dbg_scores_list,dbg_lengths_list, dbg_tuples_list, C_list, M_list = [],[], [], [], []
@@ -391,8 +391,8 @@ class GraphMatcher():
 
 
     def generate_clipper_input(self, G1_in, G2_in, A_categorical, feature_name):
-        G1 = copy.deepcopy(G1_in)
-        G2 = copy.deepcopy(G2_in)
+        # stack_nodes_feature only reads the graphs and returns a new array: no copy needed
+        G1, G2 = G1_in, G2_in
         nodes1, nodes2 = list(np.array(list(A_categorical))[:,0]), list(np.array(list(A_categorical))[:,1])
         data1 = G1.stack_nodes_feature(nodes1, feature_name)
         data2 = G2.stack_nodes_feature(nodes2, feature_name)
@@ -401,8 +401,7 @@ class GraphMatcher():
 
 
     def change_pos_dt(self, graph_in, node_list, in_dt, out_dt):
-        graph = copy.deepcopy(graph_in)
-        original_aux = graph.stack_nodes_feature(node_list, "Geometric_info")
+        original_aux = graph_in.stack_nodes_feature(node_list, "Geometric_info")
         original = copy.deepcopy(original_aux)
         if in_dt == out_dt:
             processed = original
@@ -957,8 +956,8 @@ class GraphMatcher():
                 data1, data2, all_pairs_numerical, nodes1, nodes2 = self.generate_clipper_input(G1_full, G2_full, wild_nodes_combination, "Geometric_info")
                 clipper = Clipper(self.params["levels"]["datatype"][swept_levels[1]], self.params["levels"]["clipper_invariants"][swept_levels[1]], self.params, self.logger)
                 data1, data2, all_pairs_and_parent_numerical = self.add_parents_data(data1, data2, all_pairs_numerical, parent1_data, parent2_data)
-                data1 = copy.deepcopy(self.geometric_info_transformation(data1, swept_levels[1], parent1_data))
-                data2 = copy.deepcopy(self.geometric_info_transformation(data2, swept_levels[1], parent2_data))
+                data1 = self.geometric_info_transformation(data1, swept_levels[1], parent1_data)
+                data2 = self.geometric_info_transformation(data2, swept_levels[1], parent2_data)
                 clipper.score_pairwise_consistency(data1, data2, all_pairs_and_parent_numerical)
                 M_aux, _ = clipper.get_M_C_matrices()
                 interlevel_scores = M_aux[:,-1][:-1]
@@ -1024,8 +1023,8 @@ class GraphMatcher():
                     wild_nodes_combination = multilist_combinations([G1_unmatched_planes, G2_unmatched_planes])
                     wild_nodes_data1, wild_nodes_data2, wild_pairs_numerical, wild_nodes1, wild_odes2 = self.generate_clipper_input(G1_full, G2_full, wild_nodes_combination, "Geometric_info")
                     data1, data2, all_pairs_and_parent_numerical = self.add_parents_data(wild_nodes_data1, wild_nodes_data2, wild_pairs_numerical, all_walls_gi1, all_walls_gi2)
-                    data1 = copy.deepcopy(self.geometric_info_transformation(data1, swept_levels[1], self.best_pair_data[0]))
-                    data2 = copy.deepcopy(self.geometric_info_transformation(data2, swept_levels[1], self.best_pair_data[1]))
+                    data1 = self.geometric_info_transformation(data1, swept_levels[1], self.best_pair_data[0])
+                    data2 = self.geometric_info_transformation(data2, swept_levels[1], self.best_pair_data[1])
                     clipper = Clipper(self.params["levels"]["datatype"][swept_levels[1]], "1", self.params, self.logger)
                     clipper.score_pairwise_consistency(data1, data2, all_pairs_and_parent_numerical)
                     M_aux, _ = clipper.get_M_C_matrices()
