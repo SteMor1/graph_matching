@@ -75,6 +75,8 @@ class GraphMatchingNode(Node):
         
     def set_interface(self):
         self.graph_subscription = self.create_subscription(GraphMsg,'graph_matching/graphs', self.graph_callback, 0)
+        # Room matches chosen by the operator for an ambiguous case (origin = prior room, target = online room)
+        self.operator_match_subscription = self.create_subscription(MatchMsg, 'graph_matching/operator_match', self.operator_match_callback, 10)
         self.unique_match_publisher = self.create_publisher(MatchMsg, 'graph_matching/unique_match', 10)
         # self.best_match_publisher = self.create_publisher(MatchMsg, 'graph_matching/best_match', 10)
         self.unique_match_visualization_inc_publisher = self.create_publisher(MarkerArrayMsg, 'graph_matching/unique_match_visualization/incremental', 10)
@@ -215,6 +217,78 @@ class GraphMatchingNode(Node):
                 self.unique_match_visualization_dev_publisher.publish(unique_match_visualization_dev_msg)
                 # time.sleep(999)
 
+
+    def operator_match_callback(self, msg):
+        """The rooms chosen by the operator are taken as a unique match: the matcher associates their
+        walls, stores it and publishes it on graph_matching/unique_match like one of its own."""
+        pairs = [(edge.origin_node, edge.target_node) for edge in msg.edges]  # non-room pairs are skipped by the matcher
+        self.get_logger().info(f"OPERATOR MATCH received (prior, online): {pairs}")
+        if not pairs or "Prior" not in self.gm.graphs or "Online" not in self.gm.graphs:
+            self.get_logger().warn("OPERATOR MATCH: no rooms or graphs not received yet, ignored")
+            return
+        self.gm.set_parameters(self.params)
+        match, match_full = self.gm.add_operator_match("Prior", "Online", pairs)
+        if not match:
+            self.get_logger().warn("OPERATOR MATCH: nothing new to publish")
+            return
+        n_walls = sum(1 for pair in match if pair["origin_node_attrs"]["type"] == "Plane")
+        self.get_logger().info(
+            f"UNIQUE MATCH (operator): publishing {len(match) - n_walls} rooms and {n_walls} walls on graph_matching/unique_match")
+        self.unique_match_publisher.publish(self.generate_match_msg(match))
+        self.unique_match_visualization_inc_publisher.publish(self.generate_match_visualization_msg(match))
+        if match_full:
+            self.unique_match_visualization_full_publisher.publish(self.generate_match_visualization_msg(match_full[0]))
+
+    def dump_prior(self, graph):
+        """Save the Prior graph as received (Doorway nodes included) to
+        <dump_prior_dir>/prior_<date>.json, to replay bags offline. Empty dir = off.
+        A prior identical to the last one dumped is not saved again."""
+        out_dir = os.path.expanduser(self.params.get("dump_prior_dir", ""))
+        if not out_dir:
+            return
+        to_list = lambda v: v.tolist() if isinstance(v, np.ndarray) else v
+        data = {"name": graph["name"],
+                "nodes": [[n, {k: to_list(v) for k, v in a.items()}] for n, a in graph["nodes"]],
+                "edges": [list(e) for e in graph["edges"]]}
+        text = json.dumps(data)
+        if text == self._last_prior_dump:
+            return
+        self._last_prior_dump = text
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, time.strftime("prior_%Y%m%d_%H%M%S.json"))
+        with open(path, "w") as f:
+            f.write(text)
+        self.get_logger().info(f"Prior dumped to {path}")
+
+    def check_prior_symmetry(self, graph):
+        """On a new prior: build the confusion table of blocks of adjacent rooms, growing k until
+        no block is ambiguous (that k is self.prior_k_max: from there on a unique match is trusted).
+        self.prior_confusion = {k: {block: [(twin, rot, mapping)]}} for k < k_max. Logs the per-room
+        view and warns if the prior is ambiguous with k rooms (k = prior_symmetry.k)."""
+        cfg = self.params.get("prior_symmetry", {})
+        eps, k, k_cap = cfg.get("eps", 0.4), cfg.get("k", 2), cfg.get("k_cap", 12)
+        rooms, doors = rooms_from_graph_def(graph)
+        sig = (frozenset(rooms), frozenset(doors))
+        if sig == self._prior_symmetry_sig:
+            return      # same prior already checked
+        self._prior_symmetry_sig = sig
+        t0 = time.perf_counter()
+        self.prior_confusion, self.prior_k_max = confusion_table(rooms, doors, eps, k_cap)
+        dt = time.perf_counter() - t0
+        k_max_txt = self.prior_k_max if self.prior_k_max else f">{k_cap} (k_cap reached)"
+        self.get_logger().info(f"Prior confusion table: {len(rooms)} rooms, {len(doors)} doors, eps={eps} m, "
+                               f"k_max={k_max_txt} ({dt*1e3:.0f} ms)")
+        for kk, conf in room_confusion(self.prior_confusion).items():
+            txt = ", ".join(f"{r}->{sorted(c)}" for r, c in sorted(conf.items()))
+            self.get_logger().info(f"  k={kk}: {txt}")
+        amb = self.prior_confusion.get(k, {})
+        if amb:
+            pairs = [f"{list(A)}->{list(B)} rot {deg}" for A, tw in amb.items() for B, deg, _ in tw if A <= B]
+            more = f" (+{len(pairs) - 10} more)" if len(pairs) > 10 else ""
+            self.get_logger().warn(f"AMBIGUOUS ENVIRONMENT: {len(amb)} ambiguous blocks with k={k} rooms: "
+                                   f"{', '.join(pairs[:10])}{more}")
+        else:
+            self.get_logger().info(f"Prior not ambiguous for k={k}")
 
     def subgraph_match_srv_callback(self, request, response):
         self.get_logger().info('Graph Matching: Received match request from {} to {}'.format(request.base_graph, request.target_graph))

@@ -28,6 +28,7 @@ class GraphMatcher():
         self.stored_match_graph = None
         self.stored_match_graph_dev = GraphWrapper({"nodes":[(0, {"match":set(),"split_match":[],"split_scores":[], "type" : "Plane", "merge_lvl": 0, "score_intralevel": 0})], "edges":[], "name": "deviations"})
         self.stored_consistent_combinations = []
+        self.operator_room_pairs = set()  # (G1 room, G2 room) chosen by the operator, see add_operator_match
 
     def set_parameters(self, params):
         self.params = params
@@ -56,21 +57,22 @@ class GraphMatcher():
         ### Initialize an empty match_graph to store the matching results using GraphWrapper.
         match_graph = GraphWrapper(graph_def={'name': "match",'nodes' : [], 'edges' : []}) 
         ###  Create a deep copy of the stored_match_graph to store the matching results.
+        ### Rooms matched by the operator are already matched: excluded like the stored ones.
+        filter_out_nodes = [[p for p, _ in self.operator_room_pairs], [o for _, o in self.operator_room_pairs]]
         if self.stored_match_graph:
             stored_match_graph = copy.deepcopy(self.stored_match_graph)
             merged_stored_match_graph = stored_match_graph.filter_graph_by_node_attributes({"merge_lvl":len(swept_levels)-1, "type" : swept_levels[0]})
-            filter_out_nodes = [[],[]]
             ### Extract nodes to be filtered out based on previous matches.
             for match_node_attrs in merged_stored_match_graph.get_attributes_of_all_nodes():
                 filter_out_nodes[0] += list(np.array(list(match_node_attrs[1]['match']))[:,0])
                 filter_out_nodes[1] += list(np.array(list(match_node_attrs[1]['match']))[:,1])
+        else:
+            stored_match_graph = None
+        if filter_out_nodes[0] or filter_out_nodes[1]:
             ### Filter G1_full and G2_full to exclude previously matched nodes.
             filter_in_nodes = [list(set(list(G1_full.get_nodes_ids())) - set(filter_out_nodes[0])), list(set(list(G2_full.get_nodes_ids())) - set(filter_out_nodes[1]))]
             G1_full = G1_full.filter_graph_by_node_list(filter_in_nodes[0])
             G2_full = G2_full.filter_graph_by_node_list(filter_in_nodes[1])
-
-        else:
-            stored_match_graph = None
         ### Define a nested function match_iteration to perform the actual matching at each level.    
         def match_iteration(working_node_ID, lvl):
             ### INTERLEVEL CANDIDATES GENERATION
@@ -377,6 +379,123 @@ class GraphMatcher():
         ###  Return a tuple containing the success flag, final combinations of matches, full matches, and deviated matches.
         return(success, final_combinations, final_combinations_full, final_combinations_dev)
 
+
+    def add_operator_match(self, G1_name, G2_name, room_pairs, dot_gate=0.7):
+        """Take the (G1 room, G2 room) pairs chosen by the operator as a unique match.
+
+        The walls are associated as ids_graphs does with >= 2 matched rooms: the G1->G2 rotation
+        comes from the two farthest apart matched rooms (the operator ones plus those already
+        stored), then each G1 wall of a room, rotated, goes to the G2 wall of the same room with
+        the most parallel normal (dot >= dot_gate). Without 2 rooms there is no rotation and only
+        the rooms are matched. Rooms and walls are added to stored_match_graph like a unique match,
+        and the operator rooms are excluded from the following matches.
+        Returns (match, match_full) in the format of match(): match = the new pairs only."""
+        swept_levels = self.params["levels"]["name"]
+        room_type, wall_type = swept_levels[0], swept_levels[-1]
+        G1, G2 = self.graphs[G1_name], self.graphs[G2_name]
+
+        stored_rooms, stored_walls = set(), set()
+        if self.stored_match_graph:
+            for _, attrs in self.stored_match_graph.get_attributes_of_all_nodes():
+                if attrs.get("merge_lvl") == len(swept_levels) - 1 and attrs.get("combination_type") == "group":
+                    (stored_rooms if attrs["type"] == room_type else stored_walls).update(attrs["match"])
+        matched_rooms = stored_rooms | self.operator_room_pairs
+
+        def node_type(G, n):
+            return G.get_attributes_of_node(n)["type"] if n in G.graph.nodes else None
+
+        new_rooms = []
+        for g1_id, g2_id in room_pairs:
+            pair = (str(g1_id), str(g2_id))
+            if node_type(G1, pair[0]) != room_type or node_type(G2, pair[1]) != room_type:
+                self.logger.info(f"Operator match {pair}: room not found in {G1_name}/{G2_name}, skipped")
+            elif pair in matched_rooms:
+                self.logger.info(f"Operator match {pair}: already matched")
+            elif any(p == pair[0] or o == pair[1] for p, o in matched_rooms):
+                self.logger.info(f"Operator match {pair}: conflicts with an existing match, skipped")
+            else:
+                new_rooms.append(pair)
+        if not new_rooms:
+            return [], []
+        self.operator_room_pairs.update(new_rooms)
+
+        ### Rotation G1 -> G2 from the two matched rooms farthest apart (in G2)
+        anchors = [(p, o) for p, o in matched_rooms | set(new_rooms) if node_type(G1, p) and node_type(G2, o)]
+        center = lambda G, n: np.asarray(G.get_attributes_of_node(n)["Geometric_info"][:2], dtype=float)
+        best_sep, R = 1e-3, None
+        for (p_a, o_a), (p_b, o_b) in itertools.combinations(anchors, 2):
+            axis2 = center(G2, o_b) - center(G2, o_a)
+            if np.linalg.norm(axis2) > best_sep:
+                best_sep = np.linalg.norm(axis2)
+                axis1 = center(G1, p_b) - center(G1, p_a)
+                yaw = np.arctan2(axis2[1], axis2[0]) - np.arctan2(axis1[1], axis1[0])
+                R = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]])
+
+        ### Walls of each operator room, associated by normal
+        def walls_of(G, room):
+            return sorted(n for n in G.get_neighbourhood_graph(room).get_nodes_ids() if node_type(G, n) == wall_type)
+
+        def normal(G, n):
+            v = np.asarray(G.get_attributes_of_node(n)["Geometric_info"][3:5], dtype=float)
+            return v / np.linalg.norm(v)
+
+        walls_per_room = {}
+        if R is None:
+            self.logger.info(f"Operator match: fewer than 2 matched rooms, walls not associated")
+        else:
+            for p_room, o_room in new_rooms:
+                g2_walls, pairs = walls_of(G2, o_room), []
+                for w1 in walls_of(G1, p_room):
+                    n1 = R @ normal(G1, w1)
+                    dots = [(float(n1 @ normal(G2, w2)), w2) for w2 in g2_walls if w2 not in [q for _, q in pairs]]
+                    if dots and max(dots)[0] >= dot_gate:
+                        pairs.append((w1, max(dots)[1]))
+                walls_per_room[(p_room, o_room)] = pairs
+            ### A wall shared by two rooms must get the same partner in both, and agree with the stored walls
+            all_pairs = [pair for pairs in walls_per_room.values() for pair in pairs] + list(stored_walls)
+            partners1, partners2 = {}, {}
+            for w1, w2 in all_pairs:
+                partners1.setdefault(w1, set()).add(w2)
+                partners2.setdefault(w2, set()).add(w1)
+            for room, pairs in walls_per_room.items():
+                walls_per_room[room] = [(w1, w2) for w1, w2 in pairs if (w1, w2) not in stored_walls
+                                        and len(partners1[w1]) == 1 and len(partners2[w2]) == 1]
+            # the same new pair found from two rooms (shared wall) is kept once
+            seen = set()
+            for room, pairs in walls_per_room.items():
+                walls_per_room[room] = [pair for pair in pairs if not (pair in seen or seen.add(pair))]
+        new_walls = [pair for pairs in walls_per_room.values() for pair in pairs]
+        self.logger.info(f"Operator match: rooms {new_rooms}, walls {new_walls}")
+
+        ### Store like a unique match: one group node for the rooms, one for the walls (split per room)
+        split = [set(pairs) for pairs in walls_per_room.values() if pairs]
+        if self.stored_match_graph:
+            for _, attrs in self.stored_match_graph.get_attributes_of_all_nodes():
+                if attrs.get("merge_lvl") == len(swept_levels) - 1 and attrs.get("combination_type") == "group":
+                    if attrs["type"] == room_type:
+                        attrs["match"].update(new_rooms)
+                    elif split:
+                        attrs["match"].update(new_walls)
+                        attrs["split_match"] += split
+                        attrs["split_scores"] += [1.0] * len(split)
+        elif split:
+            # match() needs a wall group node with a best_pair: only built once walls are known,
+            # until then the operator rooms are excluded through self.operator_room_pairs
+            self.stored_match_graph = GraphWrapper(graph_def={"name": "stored match", "edges": [(1, 2, {})], "nodes": [
+                (1, {"type": room_type, "match": set(new_rooms), "merge_lvl": len(swept_levels) - 1,
+                     "combination_type": "group", "score_intralevel": 1.0, "best_pair": False}),
+                (2, {"type": wall_type, "match": set(new_walls), "merge_lvl": len(swept_levels) - 1,
+                     "combination_type": "group", "score_intralevel": 1.0, "split_match": split,
+                     "split_scores": [1.0] * len(split), "best_pair": new_walls[0]})]})
+
+        as_dict = lambda p, o: {"origin_node": int(p), "target_node": int(o), "score": 1.0,
+                                "origin_node_attrs": G1.get_attributes_of_node(p), "target_node_attrs": G2.get_attributes_of_node(o)}
+        match = [as_dict(p, o) for p, o in new_rooms + new_walls]
+        if self.stored_match_graph:
+            match_full = self.gather_final_combinations_from_match_graph(G1, G2, self.stored_match_graph, swept_levels)
+        else:
+            match_full = [match]
+        return match, match_full
 
     def filter_local_match_with_global(self, local_match, global_matches):
         filtered = set([ local_elem for local_elem in local_match if any(local_elem in global_match for global_match in global_matches)])
