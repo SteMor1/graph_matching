@@ -24,9 +24,22 @@ The only tested ROS version for this package is ROS2 Humble
     
 #### Dependencies
 
-	- pip install networkx[default]
-	- pip install -U scikit-learn
-	- CLIPPER https://github.com/mit-acl/clipper
+Most of them come from `environment.yml`:
+
+	micromamba create -f environment.yml
+
+**CLIPPER is not on PyPI** and must be built from source, into that same
+environment. Its Python bindings are enabled by default, and `make pip-install`
+installs into whichever pip is active, so activate the environment first:
+
+	micromamba activate GraphMatching
+	git clone https://github.com/mit-acl/clipper
+	cd clipper && mkdir build && cd build
+	cmake .. && make -j$(nproc)
+	make pip-install
+
+That produces the `clipperpy` module the matching node imports. Verify with
+`python -c "import clipperpy"`.
 
 #### Building
 
